@@ -174,6 +174,24 @@ nkvx_retrieve(nkvx_session *s, uint32_t nsid, const char *key,
 	}
 	rc = nvfu_kv_xfer_sgl(&s->dev, nsid, SPDK_NVME_OPC_KV_RETRIEVE, key, out_len, iova, 0, 0, &cpl);
 	if (rc != 0) {
+		/* Truncation contract: a value larger than out_len completes with
+		 * CAPACITY_EXCEEDED (0x81, command-specific) and the TRUE length in
+		 * DW0 — the buffer still holds the first out_len bytes. Surface it
+		 * as a partial success (*got = DW0 > out_len) so the caller can
+		 * re-read with a right-sized buffer (datapath.rs retrieve()'s
+		 * probe/re-read), instead of swallowing the contract as a flat
+		 * -EIO. sc rides the low byte of nvfu_submit_poll's return. */
+		if ((rc & 0xff) == SPDK_NVME_SC_CAPACITY_EXCEEDED && cpl.cdw0 > 0) {
+			n = spdk_min(cpl.cdw0, out_len);
+			if (n > 0) {
+				memcpy(out, buf, n);
+			}
+			if (got != NULL) {
+				*got = cpl.cdw0;
+			}
+			spdk_dma_free(buf);
+			return 0;
+		}
 		spdk_dma_free(buf);
 		return -EIO;
 	}
